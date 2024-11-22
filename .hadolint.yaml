@@ -1,0 +1,4 @@
+---
+ignored:
+  # disable pinning apk package versions
+  - DL3018
