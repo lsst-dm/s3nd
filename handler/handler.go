@@ -63,6 +63,13 @@ func NewUploadTask(startTime time.Time) *UploadTask {
 	}
 }
 
+// the task is stopped because of an error and no data was sent
+func (t *UploadTask) StopNoUpload() {
+	t.Stop()
+	// no transfer rate if we didn't start the upload
+	t.TransferRate = ""
+}
+
 func (t *UploadTask) Stop() {
 	t.EndTime = time.Now()
 	duration := t.EndTime.Sub(t.StartTime)
@@ -236,7 +243,7 @@ func (h *S3ndHandler) doServeHTTP(r *http.Request) RequestStatus {
 
 	err := h.parseRequest(task, r)
 	if err != nil {
-		task.Stop()
+		task.StopNoUpload()
 		return RequestStatus{
 			Code: http.StatusBadRequest,
 			Msg:  errors.Wrapf(err, "error parsing request").Error(),
@@ -253,7 +260,7 @@ func (h *S3ndHandler) doServeHTTP(r *http.Request) RequestStatus {
 	semaCtx, cancel := context.WithTimeout(r.Context(), *h.conf.QueueTimeout)
 	defer cancel()
 	if err := h.parallelUploads.Acquire(semaCtx, task.UploadParts); err != nil {
-		task.Stop()
+		task.StopNoUpload()
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = errors.Wrap(err, "upload queue timeout")
 		} else {
