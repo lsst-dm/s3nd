@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/lsst-dm/s3nd/conf"
+	"github.com/lsst-dm/s3nd/conntracker"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -39,6 +40,8 @@ type S3ndHandler struct {
 	s3Client        *s3.Client
 	uploader        *manager.Uploader
 	parallelUploads semaphore.Semaphore
+	uploadPace      int // pace in *bytes* per second for uploads
+	conntracker     *conntracker.ConnTracker
 }
 
 type UploadTask struct {
@@ -155,21 +158,22 @@ func NewHandler(conf *conf.S3ndConf) *S3ndHandler {
 
 	if conf.UploadBwlimit.Value() != 0 {
 		dialer := &net.Dialer{
-			Control: func(network, address string, conn syscall.RawConn) error {
+			ControlContext: func(ctx context.Context, network, address string, conn syscall.RawConn) error {
 				// https://pkg.go.dev/syscall#RawConn
 				var operr error
 				if err := conn.Control(func(fd uintptr) {
-					operr = syscall.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MAX_PACING_RATE, int(conf.UploadBwlimit.Value()/8))
+					operr = syscall.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MAX_PACING_RATE, handler.uploadPace)
 				}); err != nil {
 					return err
 				}
 				return operr
 			},
 		}
+		handler.conntracker = conntracker.NewConnTracker(dialer)
 
 		httpClient = awshttp.NewBuildableClient().WithTransportOptions(func(t *http.Transport) {
 			defaultTransportOtptions(t)
-			t.DialContext = dialer.DialContext
+			t.DialContext = handler.conntracker.DialContext
 		})
 	} else {
 		httpClient = awshttp.NewBuildableClient().WithTransportOptions(defaultTransportOtptions)
@@ -272,12 +276,17 @@ func (h *S3ndHandler) doServeHTTP(r *http.Request) RequestStatus {
 			Task: task,
 		}
 	}
+	defer h.updatePace() // rebalance after semaphore weight is released
 	defer h.parallelUploads.Release(int(task.UploadParts))
 
 	logger.Info(
 		"upload starting",
 		slog.Any("task", task),
 	)
+
+	// set the packet pace when starting a new upload and after an upload is
+	// finished (successfully or not)
+	h.updatePace()
 
 	if err := h.uploadFileMultipart(r.Context(), task); err != nil {
 		task.Stop()
@@ -402,6 +411,66 @@ func (h *S3ndHandler) uploadFileMultipart(ctx context.Context, task *UploadTask)
 	}
 
 	return nil
+}
+
+// based on the number of active uploads, adjust the packet pacing rate on all
+// net.Conn's in the connection pool
+func (h *S3ndHandler) updatePace() {
+	// noop if there is no upload bandwidth limit configured
+	if h.conf.UploadBwlimit.Value() == 0 {
+		return
+	}
+
+	bwLimitBytes := int(h.conf.UploadBwlimit.Value() / 8)
+	// avoid div by zero
+	if h.parallelUploads.GetCount() == 0 {
+		h.uploadPace = bwLimitBytes
+	} else {
+		h.uploadPace = bwLimitBytes / h.parallelUploads.GetCount()
+	}
+
+	logger.Info(
+		"active uploads",
+		"uploads", h.parallelUploads.GetCount(),
+		"pace", fmt.Sprintf("%.3fMbit/s", float64(h.uploadPace*8)/(1<<20)),
+	)
+
+	// there's no need to touch the socket options if there are no active uploads
+	if h.parallelUploads.GetCount() == 0 {
+		// stop after logging the updated pace
+		return
+	}
+
+	h.conntracker.Monkey(func(active map[net.Conn]struct{}) {
+		updateConn := func(c net.Conn) error {
+			sc, ok := c.(syscall.Conn)
+			if !ok {
+				return errors.New("unable to cast net.Conn to syscall.Conn")
+			}
+			rc, err := sc.SyscallConn()
+			if err != nil {
+				return errors.Wrap(err, "unable to obtain syscall.RawConn from net.Conn")
+			}
+
+			var operr error
+			if err := rc.Control(func(fd uintptr) {
+				operr = syscall.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MAX_PACING_RATE, h.uploadPace)
+			}); err != nil {
+				return errors.Wrap(err, "unable to set SO_MAX_PACING_RATE on net.Conn")
+			}
+			if operr != nil {
+				return errors.Wrap(operr, "unable to set SO_MAX_PACING_RATE on net.Conn")
+			}
+
+			return nil
+		}
+
+		for conn := range active {
+			if err := updateConn(conn); err != nil {
+				panic(errors.Wrap(err, "unable to update connection pacing rate"))
+			}
+		}
+	})
 }
 
 func divCeil(a, b int64) int64 {
