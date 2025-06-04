@@ -80,7 +80,7 @@ func NewConf() S3ndConf {
 	if defaultUploadBwlimit == "" {
 		defaultUploadBwlimit = "0"
 	}
-	uploadBwlimitRaw := flag.String("upload-bwlimit", defaultUploadBwlimit, "Upload bandwidth limit in bits per second (S3ND_UPLOAD_BWLIMIT)")
+	uploadBwlimitRaw := flag.String("upload-bwlimit", defaultUploadBwlimit, "Upload aggregate bandwidth limit in bits per second (S3ND_UPLOAD_BWLIMIT)")
 
 	defaultUploadWriteBufferSize := os.Getenv("S3ND_UPLOAD_WRITE_BUFFER_SIZE")
 	if defaultUploadWriteBufferSize == "" {
