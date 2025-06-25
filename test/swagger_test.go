@@ -9,7 +9,7 @@ import (
 
 var _ = Describe("GET /swagger/", func() {
 	It("returns 200", func() {
-		resp, err := http.Get(s3ndUrl + "/swagger/")
+		resp, err := http.Get(s3ndUrl.String() + "/swagger/")
 		Expect(err).NotTo(HaveOccurred())
 		defer resp.Body.Close()
 		Expect(resp.StatusCode).To(Equal(http.StatusOK))

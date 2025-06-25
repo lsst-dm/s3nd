@@ -3,6 +3,7 @@ package s3nd_test
 import (
 	"context"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,13 +21,16 @@ import (
 )
 
 var (
-	minioC     *tcminio.MinioContainer                 // running MinIO container
-	s3ndCmd    *exec.Cmd                               // handle to the running s3nd binary
-	s3ndHost   = "localhost"                           // host where s3nd listens for requests
-	s3ndPort   = "15566"                               // port where s3nd listens for requests
-	s3ndUrl    = "http://" + s3ndHost + ":" + s3ndPort // URL for s3nd
-	s3ndBucket = "test"                                // pre-created bucket used for testing
-	s3         *minio.Client                           // MinIO client to interact with the test bucket
+	minioC   *tcminio.MinioContainer // running MinIO container
+	s3ndCmd  *exec.Cmd               // handle to the running s3nd binary
+	s3ndHost = "localhost"           // host where s3nd listens for requests
+	s3ndPort = "15566"               // port where s3nd listens for requests
+	s3ndUrl  = url.URL{
+		Scheme: "http",
+		Host:   s3ndHost + ":" + s3ndPort,
+	} // URL for s3nd
+	s3ndBucket = "test"      // pre-created bucket used for testing
+	s3         *minio.Client // MinIO client to interact with the test bucket
 )
 
 func TestS3nd(t *testing.T) {
